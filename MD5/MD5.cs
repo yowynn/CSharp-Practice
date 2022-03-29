@@ -120,7 +120,7 @@ internal class MD5
     }
 
     private static readonly Func<int, uint> T = (index) =>
-        (UInt32) (Math.Abs(Math.Sin(index)) * 0x1_0000_0000L);
+        (UInt32) (Math.Abs(Math.Sin(index + 1)) * 0x1_0000_0000L);
 
     private static readonly Func<int, Func<uint, uint, uint, uint>> F = (index) =>
     {

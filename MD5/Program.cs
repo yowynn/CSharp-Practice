@@ -10,6 +10,7 @@ if (args.Length == 1)
 else
 {
     var path = @"C:\Users\Wynn\Desktop\md5_a.dat";
+    //var path = @"C:\Users\Wynn\Desktop\111.txt";
     var file = new FileInfo(path);
     Console.WriteLine(MD5.CheckSum(file));
 }
