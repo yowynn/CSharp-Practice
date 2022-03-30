@@ -1,61 +1,58 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+using System.IO;
 using System.Text;
-using System.Threading.Tasks;
 
 internal class MD5
 {
-    private const int BLOCK_BUFFER_SIZE = 64;
-    private const int MD_BUFFER_SIZE = 16;
+    private const int BLOCK_SIZE = 64;
+    private const int MD_SIZE = 16;
+    private const int BLOCK_SIZE_PADDING = BLOCK_SIZE - sizeof(ulong);
     private class Context
     {
-        public uint[] BlockBuffer;
-        public uint[] MDBuffer;
+        public uint[] Block;
+        public uint[] MD;
         public Stream Reader;
-        public ulong Length => (ulong)Reader.Length * 8;
+        public ulong Length => (ulong)Reader.Length;
         public string Output
         {
             get
             {
-                StringBuilder output = new StringBuilder(32);
-                for (var i = 0; i < 4; ++i)
+                StringBuilder output = new(MD_SIZE * 2);
+                foreach (byte b in MDBuffer)
                 {
-                    var bytes = BitConverter.GetBytes(MDBuffer[i]);
-                    foreach (byte b in bytes)
-                    {
-                        output.AppendFormat("{0:x2}", b);
-                    }
+                    output.AppendFormat("{0:x2}", b);
                 }
                 return output.ToString();
             }
         }
-        private unsafe Span<byte> _Block {
+
+        private unsafe Span<byte> BlockBuffer
+        {
             get{
-                fixed (uint* ptr = BlockBuffer)
+                fixed (uint* ptr = Block)
                 {
-                    return new Span<byte>(ptr, BLOCK_BUFFER_SIZE);
+                    return new Span<byte>(ptr, BLOCK_SIZE);
                 }
             }
         }
 
-        private unsafe Span<byte> _MD
+        private unsafe Span<byte> MDBuffer
         {
             get
             {
-                fixed (uint* ptr = MDBuffer)
+                fixed (uint* ptr = MD)
                 {
-                    return new Span<byte>(ptr, MD_BUFFER_SIZE);
+                    return new Span<byte>(ptr, MD_SIZE);
                 }
             }
         }
 
-        public Span<byte> LengthSpan => new Span<byte>(BitConverter.GetBytes(Length));
+        private Span<byte> LengthBuffer => new(BitConverter.GetBytes(Length << 3));
 
         private Context(Stream stream)
         {
-            BlockBuffer = new uint[BLOCK_BUFFER_SIZE / 4];
-            MDBuffer = new uint[MD_BUFFER_SIZE / 4];
+            Block = new uint[BLOCK_SIZE >> 2];
+            MD = new uint[MD_SIZE >> 2];
             Reader = stream;
             Reader.Position = 0;
         }
@@ -66,7 +63,7 @@ internal class MD5
             if (length > span.Length - offset)
                 length = span.Length - offset;
             if (length < 0 || offset < 0)
-                throw new ArgumentException();
+                throw new ArgumentOutOfRangeException(nameof(length));
             for (var i = 0; i < length; ++i)
             {
                 span[offset + i] = data[i];
@@ -76,18 +73,23 @@ internal class MD5
 
         public int FillBlock()
         {
-            return Reader.Read(_Block);
+            return Reader.Read(BlockBuffer);
         }
 
-        public int FillBlock(Span<byte> data, int offset = 0, int length = 16)
+        public int FillBlock(Span<byte> data, int offset = 0, int length = BLOCK_SIZE)
         {
-            return FillSpan(_Block, data, offset, length);
+            return FillSpan(BlockBuffer, data, offset, length);
         }
 
 
-        public int FillMD(Span<byte> data, int offset = 0, int length = 16)
+        public int FillMD(Span<byte> data, int offset = 0, int length = MD_SIZE)
         {
-            return FillSpan(_MD, data, offset, length);
+            return FillSpan(MDBuffer, data, offset, length);
+        }
+
+        public void AppandLength()
+        {
+            FillBlock(LengthBuffer, BLOCK_SIZE_PADDING, sizeof(ulong));
         }
 
         public static Context FromStream(Stream stream)
@@ -103,7 +105,7 @@ internal class MD5
 
         public static Context FromByteArray(byte[] data)
         {
-            MemoryStream stream = new MemoryStream(data);
+            MemoryStream stream = new(data);
             return new Context(stream);
         }
 
@@ -124,26 +126,26 @@ internal class MD5
 
     private static readonly Func<int, Func<uint, uint, uint, uint>> F = (index) =>
     {
-        switch(index / 16)
+        return (index / 16) switch
         {
-            case 0: return (x, y, z) => x & y | ~x & z;
-            case 1: return (x, y, z) => x & z | y & ~z;
-            case 2: return (x, y, z) => x ^ y ^ z;
-            case 3: return (x, y, z) => y ^ (x | ~z);
-            default: throw new ArgumentOutOfRangeException();
-        }
+            0 => (x, y, z) => x & y | ~x & z,
+            1 => (x, y, z) => x & z | y & ~z,
+            2 => (x, y, z) => x ^ y ^ z,
+            3 => (x, y, z) => y ^ (x | ~z),
+            _ => throw new ArgumentOutOfRangeException(),
+        };
     };
 
     private static readonly Func<int, int> K = (index) =>
     {
-        switch (index / 16)
+        return (index / 16) switch
         {
-            case 0: return index % 16;
-            case 1: return (index * 5 + 1) % 16;
-            case 2: return (index * 3 + 5) % 16;
-            case 3: return (index * 7) % 16;
-            default: throw new ArgumentOutOfRangeException();
-        }
+            0 => index % 16,
+            1 => (index * 5 + 1) % 16,
+            2 => (index * 3 + 5) % 16,
+            3 => (index * 7) % 16,
+            _ => throw new ArgumentOutOfRangeException(),
+        };
     };
 
     private static readonly int[] S =
@@ -179,8 +181,8 @@ internal class MD5
 
     private static void ProcessBlock(Context context)
     {
-        var Block = context.BlockBuffer;
-        var MD = context.MDBuffer;
+        var Block = context.Block;
+        var MD = context.MD;
         UInt32 A = MD[0];
         UInt32 B = MD[1];
         UInt32 C = MD[2];
@@ -199,24 +201,24 @@ internal class MD5
     private static string CheckSum(Context context)
     {
         context.FillMD(MD);
-        int fillSize = context.FillBlock();
-        while (fillSize == BLOCK_BUFFER_SIZE)
+        int filled = context.FillBlock();
+        while (filled == BLOCK_SIZE)
         {
             ProcessBlock(context);
-            fillSize = context.FillBlock();
+            filled = context.FillBlock();
         }
-        if (fillSize < 56)
+        if (filled < BLOCK_SIZE_PADDING)
         {
-            context.FillBlock(new Span<byte>(PAD, 0, 56 - fillSize), fillSize, 56 - fillSize);
-            context.FillBlock(context.LengthSpan, 56, 8);
+            context.FillBlock(new Span<byte>(PAD, 0, BLOCK_SIZE_PADDING - filled), filled, BLOCK_SIZE_PADDING - filled);
+            context.AppandLength();
             ProcessBlock(context);
         }
         else
         {
-            context.FillBlock(new Span<byte>(PAD, 0, 64 - fillSize), fillSize, 64 - fillSize);
+            context.FillBlock(new Span<byte>(PAD, 0, BLOCK_SIZE - filled), filled, BLOCK_SIZE - filled);
             ProcessBlock(context);
-            context.FillBlock(new Span<byte>(PAD, 64 - fillSize, 56), 0, 56);
-            context.FillBlock(context.LengthSpan, 56, 8);
+            context.FillBlock(new Span<byte>(PAD, BLOCK_SIZE - filled, BLOCK_SIZE_PADDING), 0, BLOCK_SIZE_PADDING);
+            context.AppandLength();
             ProcessBlock(context);
         }
         return context.Output;
